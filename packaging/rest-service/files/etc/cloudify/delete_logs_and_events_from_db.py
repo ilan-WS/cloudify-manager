@@ -14,6 +14,7 @@
 #  * See the License for the specific language governing permissions and
 #  * limitations under the License.
 
+print('v2')
 import psycopg2
 from datetime import datetime, timedelta
 # cloudify rest configuration is available as config.instance

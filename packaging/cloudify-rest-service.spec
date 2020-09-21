@@ -7,7 +7,7 @@
 %global __requires_exclude LIBDBUS_1_3
 
 Name:           cloudify-rest-service
-Version:        %{CLOUDIFY_VERSION}
+Version:        5.2
 Release:        %{CLOUDIFY_PACKAGE_RELEASE}%{?dist}
 Summary:        Cloudify's REST Service
 Group:          Applications/Multimedia
@@ -92,7 +92,7 @@ getent passwd cfyuser >/dev/null || useradd -r -g cfyuser -d /etc/cloudify -s /s
 /etc/logrotate.d/cloudify-amqp-postgres
 /etc/sudoers.d/cloudify-restservice
 /opt/restservice
-/usr/lib/systemd/system/cloudify-restservice.service
+%config(noreplace) /usr/lib/systemd/system/cloudify-restservice.service
 /usr/lib/systemd/system/cloudify-amqp-postgres.service
 
 %attr(750,cfyuser,adm) /var/log/cloudify/rest
