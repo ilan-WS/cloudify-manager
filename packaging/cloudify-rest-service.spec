@@ -38,11 +38,11 @@ virtualenv %_manager_env
 %_manager_env/bin/pip install "${RPM_SOURCE_DIR}/rest-service"[dbus]
 %_manager_env/bin/pip install "${RPM_SOURCE_DIR}/amqp-postgres"
 
-# Jinja2 includes 2 files which will only be imported if async is available,
+# Jinja2 and attrs include files which will only be imported if available,
 # but rpmbuild's brp-python-bytecompile falls over when it finds them. Here
 # we remove them.
 rm -f %_manager_env/lib/python2.7/site-packages/jinja2/async*.py
-
+rm -f %_manager_env/lib/python2.7/site-packages/attr/_next_gen*.py
 
 %install
 
