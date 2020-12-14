@@ -195,6 +195,7 @@ def allow_agent(manager_container, package_agent):
         "1iauth sufficient pam_succeed_if.so user = cfyuser",
         '/etc/pam.d/su'
     ])
+    _clean_manager(manager_container.container_id)
 
 
 @pytest.fixture(scope='session')
