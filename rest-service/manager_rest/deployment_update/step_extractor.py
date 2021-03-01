@@ -13,6 +13,7 @@
 #  * See the License for the specific language governing permissions and
 #  * limitations under the License.
 
+from datetime import datetime
 from functools import total_ordering
 from contextlib import contextmanager
 
@@ -167,18 +168,17 @@ class DeploymentPlan(dict):
         creates a deployment a nodes in their stored format, to pass to the
         constructor.
         """
-        rm = manager_rest.resource_manager.get_resource_manager()
         deployment_plan = deployment_update.deployment_plan
         deployment_id = deployment_update.deployment_id
-        new_deployment = rm.prepare_deployment_for_storage(deployment_id,
-                                                           deployment_plan)
+        new_deployment = prepare_deployment_for_storage(deployment_id,
+                                                        deployment_plan)
         dep_dict = new_deployment.to_dict(suppress_error=True)
         dep_dict['blueprint_id'] = deployment_update.deployment.blueprint.id
         deployment_plugins_to_install = \
             deployment_plan['deployment_plugins_to_install']
         workflow_plugins_to_install = \
             deployment_plan['workflow_plugins_to_install']
-        nodes = rm.prepare_deployment_nodes_for_storage(deployment_plan)
+        nodes = prepare_deployment_nodes_for_storage(deployment_plan)
         nodes_dict = dict()
         for node in nodes:
             node_dict = node.to_dict(suppress_error=True)
@@ -193,6 +193,75 @@ class DeploymentPlan(dict):
     def _transform_plugins(plugins):
         plugins_by_name = {plugin['name']: plugin for plugin in plugins}
         return plugins_by_name
+
+
+def prepare_deployment_for_storage(deployment_id, deployment_plan):
+    now = datetime.utcnow()
+    return models.Deployment(
+        id=deployment_id,
+        created_at=now,
+        updated_at=now,
+        description=deployment_plan['description'],
+        workflows=deployment_plan['workflows'],
+        inputs=deployment_plan['inputs'],
+        policy_types=deployment_plan['policy_types'],
+        policy_triggers=deployment_plan['policy_triggers'],
+        groups=deployment_plan['groups'],
+        scaling_groups=deployment_plan['scaling_groups'],
+        outputs=deployment_plan['outputs'],
+        capabilities=deployment_plan.get('capabilities', {})
+    )
+
+def prepare_deployment_nodes_for_storage(deployment_plan, node_ids=None):
+    """
+    create deployment nodes in storage based on a provided blueprint
+    :param deployment_plan: deployment_plan
+    :param node_ids: optionally create only nodes with these ids
+    """
+    node_ids = node_ids or []
+    if not isinstance(node_ids, list):
+        node_ids = [node_ids]
+
+    raw_nodes = deployment_plan['nodes']
+    if node_ids:
+        raw_nodes = \
+            [node for node in raw_nodes if node['id'] in node_ids]
+    nodes = []
+    for raw_node in raw_nodes:
+        scalable = raw_node['capabilities']['scalable']['properties']
+        nodes.append(models.Node(
+            id=raw_node['name'],
+            type=raw_node['type'],
+            type_hierarchy=raw_node['type_hierarchy'],
+            number_of_instances=scalable['current_instances'],
+            planned_number_of_instances=scalable['current_instances'],
+            deploy_number_of_instances=scalable['default_instances'],
+            min_number_of_instances=scalable['min_instances'],
+            max_number_of_instances=scalable['max_instances'],
+            host_id=raw_node['host_id'] if 'host_id' in raw_node else None,
+            properties=raw_node['properties'],
+            operations=raw_node['operations'],
+            plugins=raw_node['plugins'],
+            plugins_to_install=raw_node.get('plugins_to_install'),
+            relationships=_prepare_node_relationships(raw_node)))
+    return nodes
+
+
+def _prepare_node_relationships(raw_node):
+    if 'relationships' not in raw_node:
+        return []
+    prepared_relationships = []
+    for raw_relationship in raw_node['relationships']:
+        relationship = {
+            'target_id': raw_relationship['target_id'],
+            'type': raw_relationship['type'],
+            'type_hierarchy': raw_relationship['type_hierarchy'],
+            'properties': raw_relationship['properties'],
+            'source_operations': raw_relationship['source_operations'],
+            'target_operations': raw_relationship['target_operations'],
+        }
+        prepared_relationships.append(relationship)
+    return prepared_relationships
 
 
 @total_ordering

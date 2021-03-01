@@ -58,7 +58,7 @@ from manager_rest.plugins_update.constants import PLUGIN_UPDATE_WORKFLOW
 from manager_rest.rest.rest_utils import (
     get_labels_from_plan, parse_datetime_string,
     RecursiveDeploymentDependencies, update_inter_deployment_dependencies,
-    verify_blueprint_uploaded_state,  compute_rule_from_scheduling_params)
+    verify_blueprint_uploaded_state, compute_rule_from_scheduling_params)
 from manager_rest.deployment_update.constants import STATES as UpdateStates
 from manager_rest.plugins_update.constants import STATES as PluginsUpdateStates
 
@@ -154,6 +154,16 @@ class ResourceManager(object):
                 self.sm.update(plugin_update)
                 # Delete a temporary blueprint
                 self.sm.delete(plugin_update.temp_blueprint)
+
+        if execution.workflow_id == 'create_deployment_environment' and \
+                status == ExecutionState.TERMINATED:
+            try:
+                self._create_deployment_initial_dependencies(
+                    execution.deployment)
+            except Exception:
+                execution.status = ExecutionState.FAILED
+                self.sm.update(execution)
+                raise
 
         if execution.workflow_id == 'delete_deployment_environment' and \
                 status == ExecutionState.TERMINATED:
@@ -814,6 +824,8 @@ class ResourceManager(object):
                          send_handler: 'SendHandler' = None):
         execution_creator = execution_creator or current_user
         deployment = self.sm.get(models.Deployment, deployment_id)
+        self._verify_deployment_environment_created_successfully(
+            deployment_id)
         self._validate_permitted_to_execute_global_workflow(deployment)
         blueprint_id = blueprint_id or deployment.blueprint_id
         blueprint = self.sm.get(models.Blueprint, blueprint_id)
@@ -826,10 +838,7 @@ class ResourceManager(object):
             new_execution = execution
             execution_parameters = parameters
             execution_id = execution.id
-
         else:
-            self._verify_deployment_environment_created_successfully(
-                deployment_id)
             execution_parameters = \
                 ResourceManager._merge_and_validate_execution_parameters(
                     workflow, workflow_id, parameters, allow_custom_parameters)
@@ -1456,6 +1465,18 @@ class ResourceManager(object):
                     ' while a `create_snapshot` workflow is running or queued'
                     ' (snapshot id: {0})'.format(e.id))
 
+    def _override_failed_deployment(self, deployment_id):
+        dep = self.sm.get(models.Deployment, deployment_id, fail_silently=True)
+        if not dep:
+            return
+        if len(dep.executions) != 1:
+            return
+        if dep.executions[0].workflow_id != 'create_deployment_environment':
+            return
+        create_env_execution = dep.executions[0]
+        if create_env_execution.status == ExecutionState.FAILED:
+            self.delete_deployment(dep)
+
     def create_deployment(self,
                           blueprint_id,
                           deployment_id,
@@ -1469,43 +1490,12 @@ class ResourceManager(object):
                           labels=None):
         blueprint = self.sm.get(models.Blueprint, blueprint_id)
         verify_blueprint_uploaded_state(blueprint)
+        self._override_failed_deployment(deployment_id)
         plan = blueprint.plan
         site = self.sm.get(models.Site, site_name) if site_name else None
         deployment_labels = self._handle_deployment_labels(labels, plan)
 
-        try:
-            deployment_plan = tasks.prepare_deployment_plan(
-                plan, get_secret_method, inputs,
-                runtime_only_evaluation=runtime_only_evaluation)
-        except parser_exceptions.MissingRequiredInputError as e:
-            raise manager_exceptions.MissingRequiredDeploymentInputError(
-                str(e))
-        except parser_exceptions.UnknownInputError as e:
-            raise manager_exceptions.UnknownDeploymentInputError(str(e))
-        except parser_exceptions.InputEvaluationError as e:
-            raise manager_exceptions.DeploymentInputEvaluationError(str(e))
-        except parser_exceptions.ConstraintException as e:
-            raise manager_exceptions.ConstraintError(str(e))
-        except parser_exceptions.UnknownSecretError as e:
-            raise manager_exceptions.UnknownDeploymentSecretError(str(e))
-        except parser_exceptions.UnsupportedGetSecretError as e:
-            raise manager_exceptions.UnsupportedDeploymentGetSecretError(
-                str(e))
 
-        #  validate plugins exists on manager when
-        #  skip_plugins_validation is False
-        if not skip_plugins_validation:
-            plugins_list = deployment_plan.get(
-                constants.DEPLOYMENT_PLUGINS_TO_INSTALL, [])
-            # validate that all central-deployment plugins are installed
-            for plugin in plugins_list:
-                self.validate_plugin_is_installed(plugin)
-
-            # validate that all host_agent plugins are installed
-            host_agent_plugins = extract_host_agent_plugins_from_plan(
-                deployment_plan)
-            for plugin in host_agent_plugins:
-                self.validate_plugin_is_installed(plugin)
         visibility = self.get_resource_visibility(models.Deployment,
                                                   deployment_id,
                                                   visibility,
@@ -1516,9 +1506,27 @@ class ResourceManager(object):
                 "Can't create global deployment {0} because blueprint {1} "
                 "is not global".format(deployment_id, blueprint_id)
             )
-        new_deployment = self.prepare_deployment_for_storage(
-            deployment_id,
-            deployment_plan
+
+        #  validate plugins exists on manager when
+        #  skip_plugins_validation is False
+        if not skip_plugins_validation:
+            plugins_list = plan.get(
+                constants.DEPLOYMENT_PLUGINS_TO_INSTALL, [])
+            # validate that all central-deployment plugins are installed
+            for plugin in plugins_list:
+                self.validate_plugin_is_installed(plugin)
+
+            # validate that all host_agent plugins are installed
+            host_agent_plugins = extract_host_agent_plugins_from_plan(
+                plan)
+            for plugin in host_agent_plugins:
+                self.validate_plugin_is_installed(plugin)
+
+        now = datetime.utcnow()
+        new_deployment = models.Deployment(
+            id=deployment_id,
+            created_at=now,
+            updated_at=now,
         )
         new_deployment.runtime_only_evaluation = runtime_only_evaluation
         new_deployment.blueprint = blueprint
@@ -1529,16 +1537,6 @@ class ResourceManager(object):
             new_deployment.site = site
 
         self.sm.put(new_deployment)
-
-        self._create_deployment_nodes(deployment_id, deployment_plan)
-
-        self._create_deployment_node_instances(
-            deployment_id,
-            dsl_node_instances=deployment_plan['node_instances'])
-
-        self._create_deployment_initial_dependencies(
-            deployment_plan, new_deployment)
-
         self.create_resource_labels(models.DeploymentLabel,
                                     new_deployment,
                                     deployment_labels)
@@ -1546,7 +1544,8 @@ class ResourceManager(object):
 
         try:
             self._create_deployment_environment(new_deployment,
-                                                deployment_plan,
+                                                inputs,
+                                                skip_plugins_validation,
                                                 bypass_maintenance)
         except manager_exceptions.ExistingRunningExecutionError as e:
             self.delete_deployment(new_deployment)
@@ -2143,7 +2142,8 @@ class ResourceManager(object):
 
     def _create_deployment_environment(self,
                                        deployment,
-                                       deployment_plan,
+                                       inputs,
+                                       skip_plugins_validation,
                                        bypass_maintenance):
         wf_id = 'create_deployment_environment'
         deployment_env_creation_task_name = \
@@ -2154,17 +2154,8 @@ class ResourceManager(object):
             deployment=deployment,
             bypass_maintenance=bypass_maintenance,
             execution_parameters={
-                'deployment_plugins_to_install': deployment_plan[
-                    constants.DEPLOYMENT_PLUGINS_TO_INSTALL],
-                'workflow_plugins_to_install': deployment_plan[
-                    constants.WORKFLOW_PLUGINS_TO_INSTALL],
-                'policy_configuration': {
-                    'policy_types': deployment_plan[constants.POLICY_TYPES],
-                    'policy_triggers':
-                        deployment_plan[constants.POLICY_TRIGGERS],
-                    'groups': deployment_plan[constants.GROUPS],
-                    'api_token': current_user.api_token
-                }
+                'inputs': inputs,
+                'skip_plugins_validation': skip_plugins_validation,
             }
         )
 
@@ -2449,9 +2440,12 @@ class ResourceManager(object):
 
         send_event(event, 'hook')
 
-    def _create_deployment_initial_dependencies(self,
-                                                deployment_plan,
-                                                source_deployment):
+    def _create_deployment_initial_dependencies(self, source_deployment):
+        deployment_plan = tasks.prepare_deployment_plan(
+            source_deployment.blueprint.plan,
+            get_secret_method,
+            source_deployment.inputs
+        )
         new_dependencies = deployment_plan.setdefault(
             INTER_DEPLOYMENT_FUNCTIONS, {})
 
