@@ -134,3 +134,5 @@ def unlock_table(lock_number):
     # make sure a flask app exists before calling this function
     db.session.execute('SELECT pg_advisory_unlock(:lock_number)',
                        {'lock_number': lock_number})
+
+

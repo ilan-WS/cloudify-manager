@@ -16,6 +16,7 @@
 import json
 
 from collections import OrderedDict
+from functools import wraps
 
 from dateutil import parser as date_parser
 from flask_sqlalchemy import SQLAlchemy, inspect
@@ -24,6 +25,7 @@ from sqlalchemy import MetaData
 from sqlalchemy.ext.associationproxy import (ASSOCIATION_PROXY,
                                              AssociationProxyInstance)
 from sqlalchemy.ext.hybrid import HYBRID_PROPERTY
+from sqlalchemy.orm import validates
 from sqlalchemy.orm.interfaces import NOT_EXTENSION
 
 from cloudify._compat import text_type
@@ -253,3 +255,17 @@ def is_orm_attribute(item):
     if isinstance(item, AssociationProxyInstance):
         return False
     return item.is_attribute
+
+
+def validates_all(*names):
+    def _deco(f):
+        @validates(*names)
+        @wraps(f)
+        def _validator(self, key, value):
+            attribs = {n: getattr(self, n) for n in names}
+            attribs[key] = value
+            if all(val is not None for val in attribs.values()):
+                f(self, **attribs)
+            return value
+        return _validator
+    return _deco

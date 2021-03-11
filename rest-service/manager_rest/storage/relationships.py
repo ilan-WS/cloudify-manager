@@ -21,6 +21,7 @@ def foreign_key(foreign_key_column,
                 index=True,
                 primary_key=False,
                 ondelete='CASCADE',
+                column_name=None,
                 **fk_kwargs):
     """Return a ForeignKey object with the relevant
 
@@ -31,6 +32,14 @@ def foreign_key(foreign_key_column,
     :param ondelete: If a record in the parent table is deleted, the ondelete
         action will affect the corresponding records in the child table
     """
+    if column_name:
+        return db.Column(
+            column_name,
+            db.ForeignKey(foreign_key_column, ondelete=ondelete, **fk_kwargs),
+            nullable=nullable,
+            index=index,
+            primary_key=primary_key,
+        )
     return db.Column(
         db.ForeignKey(foreign_key_column, ondelete=ondelete, **fk_kwargs),
         nullable=nullable,
