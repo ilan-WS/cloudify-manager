@@ -875,8 +875,7 @@ class ResourceManager(object):
                          send_handler: 'SendHandler' = None):
         if execution.deployment:
             self._check_allow_global_execution(execution.deployment)
-            self._verify_dependencies_not_affected(
-                execution.workflow_id, execution.deployment, force)
+            self._verify_dependencies_not_affected(execution, force)
 
         should_queue = queue
         if not allow_overlapping_running_wf:
@@ -2214,31 +2213,35 @@ class ResourceManager(object):
                 )
             )
 
-    def _verify_dependencies_not_affected(self,
-                                          workflow_id, deployment, force):
-        if workflow_id not in ['stop', 'uninstall', 'update']:
+    def _verify_dependencies_not_affected(self, execution, force):
+        if execution.workflow_id not in ['stop', 'uninstall', 'update']:
             return
         # if we're in the middle of an execution initiated by the component
         # creator, we'd like to drop the component dependency from the list
         deployment_dependencies = self.retrieve_and_display_dependencies(
             deployment
         )
+        excluded_ids = self._excluded_component_creator_ids(
+            execution.deployment)
+        deployment_dependencies = \
+            dep_graph.retrieve_and_display_dependencies(
+                execution.deployment.id,
+                excluded_component_creator_ids=excluded_ids)
         if not deployment_dependencies:
             return
         if force:
             current_app.logger.warning(
-                "Force-executing workflow `{0}` on deployment {1} despite "
-                "having the following existing dependent installations\n"
-                "{2}".format(
-                    workflow_id, deployment.id, deployment_dependencies
-                ))
+                "Force-executing workflow `%s` on deployment %s despite "
+                "having existing dependent installations:\n%s",
+                execution.workflow_id, execution.deployment.id,
+                deployment_dependencies)
             return
         # If part of a deployment update - mark the update as failed
-        if workflow_id == 'update':
+        if execution.workflow_id == 'update':
             dep_update = self.sm.get(
                 models.DeploymentUpdate,
                 None,
-                filters={'deployment_id': deployment.id,
+                filters={'deployment_id': execution.deployment.id,
                          'state': UpdateStates.UPDATING}
             )
             if dep_update:
@@ -2246,11 +2249,9 @@ class ResourceManager(object):
                 self.sm.update(dep_update)
 
         raise manager_exceptions.DependentExistsError(
-            "Can't execute workflow `{0}` on deployment {1} - the "
-            "following existing installations depend on it:\n{2}".format(
-                workflow_id, deployment.id, deployment_dependencies
-            )
-        )
+            f"Can't execute workflow `{execution.workflow_id}` on deployment "
+            f"{execution.deployment.id} - existing installations depend "
+            f"on it:\n{deployment_dependencies}")
 
     def _excluded_component_creator_ids(self, deployment):
         # collect all deployment which created this deployment as a
