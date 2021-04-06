@@ -49,8 +49,6 @@ from manager_rest.rest.rest_utils import (
     get_deployment_plan,
     get_labels_from_plan,
     get_parsed_deployment,
-    RecursiveDeploymentDependencies,
-    RecursiveDeploymentLabelsDependencies,
     verify_blueprint_uploaded_state,
 )
 
@@ -194,11 +192,9 @@ class DeploymentUpdateManager(object):
 
     def delete_input_label_after_deployment_update(self,
                                                    rm,
-                                                   dep_graph,
                                                    dep,
                                                    old_csys_environment):
-        rm.delete_deployment_from_labels_graph(
-            dep_graph, dep, old_csys_environment
+        rm.delete_deployment_from_labels_graph(dep, old_csys_environment
         )
         self._delete_single_label_from_deployment(
             'csys-obj-parent',
@@ -206,28 +202,16 @@ class DeploymentUpdateManager(object):
             dep
         )
 
-    @staticmethod
-    def add_input_label_after_deployment_update(rm,
-                                                dep_graph,
-                                                dep,
+    def add_input_label_after_deployment_update(self, rm, dep,
                                                 new_csys_environment):
+        if not new_csys_environment:
+            return
         labels_to_add = rm.get_deployment_parents_from_inputs(
             new_csys_environment
         )
-        if labels_to_add:
-            rm.create_resource_labels(
-                models.DeploymentLabel,
-                dep,
-                labels_to_add
-            )
-            rm.add_deployment_to_labels_graph(
-                dep_graph,
-                dep,
-                new_csys_environment
-            )
-            dep_graph.propagate_deployment_statuses(
-                new_csys_environment
-            )
+        rm.create_resource_labels(models.DeploymentLabel, dep, labels_to_add)
+        target = self.sm.get(models.Deployment, new_csys_environment)
+        rm.add_deployment_to_labels_graph(dep, target)
 
     def update_deployment_parents_from_input(self,
                                              rm,
@@ -238,40 +222,22 @@ class DeploymentUpdateManager(object):
         new_inputs = new_inputs or {}
         old_csys_environment = old_inputs.get('csys-environment')
         new_csys_environment = new_inputs.get('csys-environment')
-        if old_csys_environment or new_csys_environment:
-            dep_graph = RecursiveDeploymentLabelsDependencies(self.sm)
-            dep_graph.create_dependencies_graph()
-
-            if new_csys_environment and not old_csys_environment:
-                self.add_input_label_after_deployment_update(
-                    rm,
-                    dep_graph,
-                    dep,
-                    new_csys_environment
-                )
-
-            elif old_csys_environment and not new_csys_environment:
+        if old_csys_environment != new_csys_environment:
+            if old_csys_environment:
                 self.delete_input_label_after_deployment_update(
                     rm,
-                    dep_graph,
                     dep,
                     old_csys_environment
                 )
 
-            elif old_csys_environment and new_csys_environment and \
-                    old_csys_environment != new_csys_environment:
-                self.delete_input_label_after_deployment_update(
-                    rm,
-                    dep_graph,
-                    dep,
-                    old_csys_environment
-                )
+            if new_csys_environment:
+                rm.verify_csys_environment_input(dep, new_csys_environment)
                 self.add_input_label_after_deployment_update(
                     rm,
-                    dep_graph,
                     dep,
                     new_csys_environment
                 )
+
 
     def commit_deployment_update(self,
                                  dep_update,
@@ -342,12 +308,9 @@ class DeploymentUpdateManager(object):
             parents_labels = rm.get_deployment_parents_from_labels(
                 labels_to_create
             )
-            dep_graph = RecursiveDeploymentLabelsDependencies(self.sm)
-            dep_graph.create_dependencies_graph()
             rm.verify_attaching_deployment_to_parents(
-                dep_graph,
+                deployment,
                 parents_labels,
-                deployment.id
             )
         self.sm.update(dep_update)
         # If this is a preview, no need to run workflow and update DB
@@ -355,12 +318,11 @@ class DeploymentUpdateManager(object):
             dep_update.state = STATES.PREVIEW
             dep_update.id = None
 
-            # retrieving recursive dependencies for the updated deployment
-            dep_graph = RecursiveDeploymentDependencies(self.sm)
-            dep_graph.create_dependencies_graph()
-            deployment_dependencies = dep_graph.retrieve_dependent_deployments(
-                dep_update.deployment_id)
-            dep_update.set_recursive_dependencies(deployment_dependencies)
+            deployment_dependencies = dep_update.deployment.get_dependents(
+                fetch_deployments=False)
+            dep_update.recursive_dependencies = [
+                dep.summarize() for dep in deployment_dependencies
+            ]
             dep_update.schedules_to_create = \
                 self.list_schedules(schedules_to_create)
             dep_update.schedules_to_delete = schedules_to_delete
@@ -428,11 +390,8 @@ class DeploymentUpdateManager(object):
         )
         if parents_labels:
             for parent in parents_labels:
-                rm.add_deployment_to_labels_graph(
-                    dep_graph,
-                    deployment,
-                    parent
-                )
+                target = self.sm.get(models.Deployment, parent)
+                rm.add_deployment_to_labels_graph(deployment, target)
         self.update_deployment_parents_from_input(
             rm,
             deployment,
